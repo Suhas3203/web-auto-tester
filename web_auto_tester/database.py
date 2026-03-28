@@ -48,7 +48,8 @@ else:
     _ssl_ctx = _ssl.create_default_context()
     _ssl_ctx.check_hostname = False
     _ssl_ctx.verify_mode = _ssl.CERT_NONE
-    _connect_args = {"ssl": _ssl_ctx}
+    # statement_cache_size=0 required for Supabase/PgBouncer transaction pooling
+    _connect_args = {"ssl": _ssl_ctx, "statement_cache_size": 0}
 
 _engine_kwargs: dict = {"echo": False, "connect_args": _connect_args}
 if "sqlite" not in DATABASE_URL:
