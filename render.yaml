@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: web-auto-tester
+    runtime: docker
+    repo: https://github.com/Suhas3203/web-auto-tester.git
+    branch: main
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: REPORTS_DIR
+        value: /tmp/web-auto-tester-reports
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    healthCheckPath: /health
+    autoDeploy: true
