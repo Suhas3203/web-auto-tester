@@ -321,7 +321,8 @@ async def home():
     background: #0f1117; color: #e1e4ed; min-height: 100vh;
     display: flex; flex-direction: column; align-items: center;
   }
-  .container { max-width: 900px; width: 100%; padding: 40px 20px; }
+  .container { max-width: 1200px; width: 100%; padding: 40px 24px; }
+  .container-narrow { max-width: 860px; margin: 0 auto; }
   h1 { font-size: 2.5rem; text-align: center; margin-bottom: 8px; }
   h1 span { color: #6366f1; }
   .subtitle { text-align: center; color: #8b8fa3; margin-bottom: 40px; font-size: 1.1rem; }
@@ -425,17 +426,32 @@ async def home():
   .elapsed { color: #6b6e8a; font-size: 0.85rem; float: right; }
 
   /* ── History table ── */
-  .history-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 0.9rem; table-layout: fixed; }
-  .history-table th {
-    padding: 10px 12px; text-align: left; border-bottom: 1px solid #2e3348;
-    color: #8b8fa3; font-size: 0.8rem; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;
-    overflow: hidden;
+  .table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .history-table {
+    width: 100%; min-width: 900px; border-collapse: collapse;
+    margin-top: 4px; font-size: 0.88rem;
   }
-  .history-table td { padding: 11px 12px; border-bottom: 1px solid #1e2130; vertical-align: middle; overflow: hidden; }
+  .history-table th {
+    padding: 11px 16px; text-align: left; border-bottom: 2px solid #2e3348;
+    color: #8b8fa3; font-size: 0.75rem; text-transform: uppercase;
+    font-weight: 700; letter-spacing: 0.6px; white-space: nowrap;
+    background: #1a1d27;
+  }
+  .history-table td {
+    padding: 13px 16px; border-bottom: 1px solid #1e2130;
+    vertical-align: middle; white-space: nowrap;
+  }
   .history-table tr:last-child td { border-bottom: none; }
   .history-table tr:hover td { background: #1e2130; }
-  .history-table .url-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7cbe0; }
-  .history-table .report-cell { white-space: nowrap; }
+  .history-table .url-cell {
+    max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: #c7cbe0;
+  }
+  .history-table .report-cell { white-space: nowrap; min-width: 100px; }
+  .history-table .fw-cell { min-width: 110px; }
+  .history-table .date-cell { min-width: 120px; color: #8b8fa3; }
+  .history-table .num-cell { text-align: center; min-width: 60px; }
+  .history-table .status-cell { min-width: 90px; }
   .badge { padding: 3px 10px; border-radius: 10px; font-size: 0.78rem; font-weight: 700; }
   .badge.completed { background: #0f2a1f; color: #22c55e; }
   .badge.failed { background: #2a0f0f; color: #ef4444; }
@@ -462,7 +478,7 @@ async def home():
   <p class="subtitle">Framework-agnostic automated testing for any deployed web application</p>
 
   <!-- Run Tests Card -->
-  <div class="card">
+  <div class="card container-narrow">
     <div class="card-title"><div class="dot"></div> New Test Run</div>
     <label for="url">Target URL</label>
     <input type="text" id="url" placeholder="https://your-app.com" autofocus>
@@ -756,29 +772,19 @@ async function loadHistory() {
     }
 
     el.innerHTML = `
+      <div class="table-scroll">
       <table class="history-table">
-        <colgroup>
-          <col style="width:22%">
-          <col style="width:12%">
-          <col style="width:9%">
-          <col style="width:7%">
-          <col style="width:7%">
-          <col style="width:8%">
-          <col style="width:13%">
-          <col style="width:10%">
-          <col style="width:12%">
-        </colgroup>
         <thead>
           <tr>
-            <th>URL</th>
-            <th>Framework</th>
-            <th>Pass Rate</th>
-            <th>Tests</th>
-            <th>Pages</th>
-            <th>Duration</th>
-            <th>Date</th>
-            <th>Status</th>
-            <th>Report</th>
+            <th style="min-width:200px;">URL</th>
+            <th style="min-width:130px;">Framework</th>
+            <th style="min-width:95px;">Pass Rate</th>
+            <th style="min-width:65px;">Tests</th>
+            <th style="min-width:65px;">Pages</th>
+            <th style="min-width:85px;">Duration</th>
+            <th style="min-width:140px;">Date</th>
+            <th style="min-width:105px;">Status</th>
+            <th style="min-width:115px;">Report</th>
           </tr>
         </thead>
         <tbody>
@@ -789,25 +795,26 @@ async function loadHistory() {
             const fwVer = r.framework_version ? ` <span class="fw-tag">v${escHtml(r.framework_version)}</span>` : '';
             const reportLink = r.status === 'completed'
               ? `<a class="action-link" href="/api/test/${r.id}/report" target="_blank">HTML</a>
-                 &nbsp;<span style="color:#2e3348">|</span>&nbsp;
+                 <span style="color:#3d4060; margin:0 5px;">|</span>
                  <a class="action-link" href="/api/test/${r.id}/json" target="_blank">JSON</a>`
               : r.error_msg
                 ? `<span style="color:#6b6e8a;font-size:0.78rem;" title="${escHtml(r.error_msg)}">—</span>`
                 : '—';
             return `<tr>
               <td class="url-cell" title="${escHtml(r.url)}">${escHtml(r.url)}</td>
-              <td>${escHtml(fw)}${fwVer}</td>
+              <td class="fw-cell">${escHtml(fw)}${fwVer}</td>
               <td class="pass-rate-cell ${rateClass}">${r.status === 'completed' ? rate.toFixed(1) + '%' : '—'}</td>
-              <td>${r.total_tests || '—'}</td>
-              <td>${r.total_pages || '—'}</td>
-              <td>${r.duration_seconds ? r.duration_seconds + 's' : '—'}</td>
-              <td style="white-space:nowrap; color:#8b8fa3;">${fmtDate(r.started_at)}</td>
-              <td><span class="badge ${r.status}">${r.status}</span></td>
+              <td class="num-cell">${r.total_tests || '—'}</td>
+              <td class="num-cell">${r.total_pages || '—'}</td>
+              <td class="num-cell">${r.duration_seconds ? r.duration_seconds + 's' : '—'}</td>
+              <td class="date-cell">${fmtDate(r.started_at)}</td>
+              <td class="status-cell"><span class="badge ${r.status}">${r.status}</span></td>
               <td class="report-cell">${reportLink}</td>
             </tr>`;
           }).join('')}
         </tbody>
-      </table>`;
+      </table>
+      </div>`;
   } catch(e) {
     console.error('Failed to load history:', e);
   }
