@@ -73,6 +73,11 @@ class DiscoveredPage:
     framework: FrameworkInfo = field(default_factory=FrameworkInfo)
     depth: int = 0
     found_on: str = ""
+    # Lite-runner fields (populated by httpx crawler, None in Playwright mode)
+    _html: str | None = field(default=None, repr=False)
+    _soup: Any | None = field(default=None, repr=False)
+    _resp_headers: dict[str, str] | None = field(default=None, repr=False)
+    _ttfb_ms: float = 0.0
 
 
 @dataclass

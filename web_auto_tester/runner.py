@@ -2,6 +2,11 @@
 Test runner orchestrator - framework-agnostic.
 
 Coordinates discovery + analysis + report generation.
+
+Two modes:
+  - Full mode (default): Playwright + Chromium, full test suite, ~350MB RAM
+  - Lite mode (low_memory=True / RENDER env var): httpx + BeautifulSoup,
+    no browser required, ~60MB RAM — used automatically on Render free tier.
 """
 
 from __future__ import annotations
@@ -13,11 +18,7 @@ import os
 import time
 from pathlib import Path
 
-from playwright.async_api import async_playwright
-
 from .models import TestReport, PageResult, TestStatus
-from .discovery import SiteCrawler
-from .analyzers import ALL_ANALYZERS
 from .report import generate_html_report
 
 # ── Memory-optimized Chromium flags ──────────────────────────────────────────
@@ -89,22 +90,31 @@ class AutoTestRunner:
         return asyncio.run(self.run_async())
 
     async def run_async(self) -> TestReport:
-        """Async entry point - discovery -> analysis -> report."""
+        """Async entry point — dispatches to lite runner on Render/low_memory."""
+        if self.low_memory:
+            from .lite_runner import LiteTestRunner
+            lite = LiteTestRunner(
+                base_url=self.base_url,
+                max_pages=min(self.max_pages, 5),
+                max_depth=min(self.max_depth, 2),
+                output_dir=str(self.output_dir),
+                timeout=self.timeout,
+            )
+            return await lite.run_async()
+        return await self._run_playwright()
+
+    async def _run_playwright(self) -> TestReport:
+        """Full Playwright/Chromium test run (non-Render environments)."""
+        from playwright.async_api import async_playwright
+        from .discovery import SiteCrawler
+        from .analyzers import ALL_ANALYZERS
         self.output_dir.mkdir(parents=True, exist_ok=True)
         ss_dir = self.output_dir / "screenshots"
         if self.screenshots:
             ss_dir.mkdir(exist_ok=True)
 
         report = TestReport(base_url=self.base_url)
-
-        # In low-memory mode, reduce defaults
-        if self.low_memory:
-            self.max_pages = min(self.max_pages, 10)
-            self.screenshots = False  # Screenshots eat RAM on full-page render
-            viewport = {"width": 1024, "height": 576}
-            print("[*] Low-memory mode active (512MB optimized)")
-        else:
-            viewport = {"width": 1280, "height": 720}
+        viewport = {"width": 1280, "height": 720}
 
         print(f"\n{'='*60}")
         print(f"  Web Auto Tester v1.0.0")
@@ -115,14 +125,7 @@ class AutoTestRunner:
             print(f"[*] Launching {self.browser} (headless={self.headless})...")
             browser_type = getattr(pw, self.browser)
 
-            launch_args = {}
-            if self.low_memory:
-                launch_args["args"] = LOW_MEMORY_CHROMIUM_ARGS
-
-            browser = await browser_type.launch(
-                headless=self.headless,
-                **launch_args,
-            )
+            browser = await browser_type.launch(headless=self.headless)
             context = await browser.new_context(
                 viewport=viewport,
                 ignore_https_errors=True,
@@ -202,10 +205,6 @@ class AutoTestRunner:
 
                 report.pages.append(pr)
                 print(f"    => {pr.passed}P / {pr.failed}F / {pr.warnings}W\n")
-
-                # Force garbage collection between pages in low-memory mode
-                if self.low_memory:
-                    gc.collect()
 
             await browser.close()
 
