@@ -7,9 +7,13 @@ Provides a web UI and REST API to run automated tests against any deployed web a
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
+import re
 import shutil
+import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -34,6 +38,37 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 # In-memory job store
 jobs: dict[str, dict] = {}
 
+# ANSI escape code stripper
+_ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+
+
+class _LogCapture(io.TextIOBase):
+    """Captures stdout writes into a job's log list (thread-safe)."""
+
+    def __init__(self, job_id: str, original_stdout):
+        self.job_id = job_id
+        self.original = original_stdout
+        self._lock = threading.Lock()
+
+    def write(self, text):
+        if text and text.strip():
+            clean = _ansi_re.sub('', text).strip()
+            if clean:
+                with self._lock:
+                    if self.job_id in jobs:
+                        jobs[self.job_id]["logs"].append({
+                            "ts": round(time.time(), 2),
+                            "msg": clean,
+                        })
+        # Also write to original stdout for server logs
+        if self.original:
+            self.original.write(text)
+        return len(text) if text else 0
+
+    def flush(self):
+        if self.original:
+            self.original.flush()
+
 
 class TestRequest(BaseModel):
     url: str
@@ -50,10 +85,16 @@ class TestResponse(BaseModel):
 
 
 def _run_test_job(job_id: str, req: TestRequest):
-    """Run tests in background and update job status."""
+    """Run tests in background, capture logs, and update job status."""
+    # Redirect stdout to capture runner output
+    original_stdout = sys.stdout
+    log_capture = _LogCapture(job_id, original_stdout)
+    sys.stdout = log_capture
+
     try:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["started_at"] = time.time()
+        jobs[job_id]["progress"] = {"phase": "starting", "detail": "Initializing browser..."}
 
         url = req.url
         if not url.startswith(("http://", "https://")):
@@ -76,6 +117,7 @@ def _run_test_job(job_id: str, req: TestRequest):
 
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["completed_at"] = time.time()
+        jobs[job_id]["progress"] = {"phase": "done", "detail": "All tests complete"}
         jobs[job_id]["result"] = {
             "total_tests": report.total_tests,
             "passed": report.total_passed,
@@ -91,6 +133,10 @@ def _run_test_job(job_id: str, req: TestRequest):
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["completed_at"] = time.time()
+        jobs[job_id]["progress"] = {"phase": "error", "detail": str(e)}
+
+    finally:
+        sys.stdout = original_stdout
 
 
 # ── API Endpoints ────────────────────────────────────────────────────────────
@@ -103,6 +149,8 @@ async def start_test(req: TestRequest, background_tasks: BackgroundTasks):
         "status": "queued",
         "url": req.url,
         "created_at": time.time(),
+        "logs": [],
+        "progress": {"phase": "queued", "detail": "Waiting to start..."},
     }
     background_tasks.add_task(_run_test_job, job_id, req)
     return TestResponse(
@@ -117,7 +165,29 @@ async def get_test_status(job_id: str):
     """Get the status and results of a test run."""
     if job_id not in jobs:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
-    return jobs[job_id]
+    # Return everything except full logs (use /logs endpoint for that)
+    job = jobs[job_id]
+    return {
+        "status": job["status"],
+        "url": job.get("url"),
+        "progress": job.get("progress"),
+        "log_count": len(job.get("logs", [])),
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+@app.get("/api/test/{job_id}/logs")
+async def get_test_logs(job_id: str, since: int = 0):
+    """Get logs for a test run. Use ?since=N to get logs after index N."""
+    if job_id not in jobs:
+        return JSONResponse(status_code=404, content={"error": "Job not found"})
+    all_logs = jobs[job_id].get("logs", [])
+    return {
+        "status": jobs[job_id]["status"],
+        "total": len(all_logs),
+        "logs": all_logs[since:],
+    }
 
 
 @app.get("/api/test/{job_id}/report")
@@ -186,7 +256,7 @@ async def home():
     background: #0f1117; color: #e1e4ed; min-height: 100vh;
     display: flex; flex-direction: column; align-items: center;
   }
-  .container { max-width: 800px; width: 100%; padding: 40px 20px; }
+  .container { max-width: 860px; width: 100%; padding: 40px 20px; }
   h1 { font-size: 2.5rem; text-align: center; margin-bottom: 8px; }
   h1 span { color: #6366f1; }
   .subtitle { text-align: center; color: #8b8fa3; margin-bottom: 40px; font-size: 1.1rem; }
@@ -203,39 +273,115 @@ async def home():
   input:focus, select:focus { border-color: #6366f1; }
   .row { display: flex; gap: 16px; }
   .row > div { flex: 1; }
+
+  /* ── Button states ── */
   button.primary {
     width: 100%; padding: 14px; background: #6366f1; color: white; border: none;
     border-radius: 8px; font-size: 1.1rem; font-weight: 600; cursor: pointer;
-    transition: background 0.2s;
+    transition: all 0.2s; position: relative;
   }
-  button.primary:hover { background: #5558e6; }
-  button.primary:disabled { background: #3d3f5c; cursor: not-allowed; }
+  button.primary:hover:not(:disabled) { background: #5558e6; }
+  button.primary:disabled {
+    background: #2a2d4a; color: #6b6e8a; cursor: not-allowed;
+    border: 1px solid #3d3f5c;
+  }
+  button.primary .btn-spinner {
+    display: inline-block; width: 18px; height: 18px;
+    border: 2.5px solid rgba(255,255,255,0.2); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+    vertical-align: middle; margin-right: 10px;
+  }
+
+  /* ── Status panel ── */
   #status {
     margin-top: 24px; padding: 20px; border-radius: 8px; display: none;
     border: 1px solid #2e3348;
   }
-  #status.running { background: #1a1d27; border-color: #6366f1; }
+  #status.running { background: #12142a; border-color: #6366f1; }
   #status.completed { background: #0f2a1f; border-color: #22c55e; }
   #status.failed { background: #2a0f0f; border-color: #ef4444; }
-  .status-header { font-weight: 600; font-size: 1.1rem; margin-bottom: 8px; }
-  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-top: 12px; }
-  .metric { text-align: center; padding: 12px; background: #242836; border-radius: 8px; }
+
+  .status-header { font-weight: 600; font-size: 1.1rem; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+  .phase-badge {
+    display: inline-block; padding: 3px 10px; border-radius: 10px;
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .phase-badge.discovery { background: #1e2a5e; color: #818cf8; }
+  .phase-badge.analyzing { background: #2a1e5e; color: #a78bfa; }
+  .phase-badge.reporting { background: #1e3a2e; color: #6ee7b7; }
+  .phase-badge.starting { background: #2e3348; color: #8b8fa3; }
+
+  /* ── Progress bar ── */
+  .progress-bar-wrap {
+    width: 100%; height: 6px; background: #242836; border-radius: 3px;
+    margin: 12px 0 16px 0; overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%; background: linear-gradient(90deg, #6366f1, #818cf8);
+    border-radius: 3px; transition: width 0.4s ease;
+    animation: pulse-glow 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  /* ── Live log console ── */
+  .log-console {
+    background: #0a0c14; border: 1px solid #1e2030; border-radius: 8px;
+    padding: 0; margin-top: 14px; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem; max-height: 320px; overflow-y: auto;
+    scroll-behavior: smooth;
+  }
+  .log-console-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-bottom: 1px solid #1e2030;
+    background: #0e1018; border-radius: 8px 8px 0 0;
+    position: sticky; top: 0; z-index: 1;
+  }
+  .log-console-header .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .log-console-header .dot.red { background: #ef4444; }
+  .log-console-header .dot.yellow { background: #f59e0b; }
+  .log-console-header .dot.green { background: #22c55e; }
+  .log-console-header span { color: #6b6e8a; font-size: 0.75rem; margin-left: auto; }
+  .log-lines { padding: 10px 14px; }
+  .log-line {
+    padding: 2px 0; line-height: 1.6; color: #a0a4b8;
+    word-break: break-word;
+  }
+  .log-line .log-ts { color: #4a4d65; margin-right: 8px; font-size: 0.7rem; }
+  .log-line.highlight { color: #e1e4ed; font-weight: 500; }
+  .log-line.success { color: #22c55e; }
+  .log-line.error { color: #ef4444; }
+  .log-line.warning { color: #f59e0b; }
+  .log-line.phase { color: #818cf8; font-weight: 600; padding: 4px 0; }
+
+  /* ── Metrics ── */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-top: 14px; }
+  .metric { text-align: center; padding: 14px 8px; background: #242836; border-radius: 8px; border: 1px solid #2e3348; }
   .metric .value { font-size: 1.5rem; font-weight: 700; }
-  .metric .label { font-size: 0.8rem; color: #8b8fa3; margin-top: 4px; }
+  .metric .label { font-size: 0.75rem; color: #8b8fa3; margin-top: 4px; }
   .pass { color: #22c55e; }
   .fail { color: #ef4444; }
   .warn { color: #f59e0b; }
-  .links { margin-top: 16px; display: flex; gap: 12px; }
+
+  .links { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
   .links a {
     display: inline-block; padding: 10px 20px; background: #6366f1; color: white;
-    text-decoration: none; border-radius: 6px; font-weight: 500;
+    text-decoration: none; border-radius: 6px; font-weight: 500; transition: background 0.2s;
   }
   .links a:hover { background: #5558e6; }
-  .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid #2e3348;
+
+  .spinner { display: inline-block; width: 18px; height: 18px; border: 2.5px solid #2e3348;
     border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite;
     vertical-align: middle; margin-right: 8px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Elapsed timer ── */
+  .elapsed { color: #6b6e8a; font-size: 0.85rem; float: right; }
+
+  /* ── Jobs table ── */
   .jobs-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
   .jobs-table th, .jobs-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #2e3348; }
   .jobs-table th { color: #8b8fa3; font-size: 0.85rem; text-transform: uppercase; }
@@ -286,14 +432,58 @@ async def home():
 
 <script>
 let pollInterval = null;
+let logOffset = 0;
+let testStartTime = 0;
+let elapsedInterval = null;
+let currentJobId = null;
+
+function setRunning(isRunning) {
+  const btn = document.getElementById('runBtn');
+  const urlInput = document.getElementById('url');
+  if (isRunning) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-spinner"></span> Testing in progress...';
+    urlInput.disabled = true;
+    document.querySelectorAll('.row input, .row select').forEach(el => el.disabled = true);
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = 'Run Tests';
+    urlInput.disabled = false;
+    document.querySelectorAll('.row input, .row select').forEach(el => el.disabled = false);
+  }
+}
+
+function formatElapsed(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function classifyLog(msg) {
+  const lower = msg.toLowerCase();
+  if (lower.includes('phase 1') || lower.includes('phase 2') || lower.includes('phase 3')) return 'phase';
+  if (lower.includes('passed') || msg.includes('+')) return 'success';
+  if (lower.includes('error') || lower.includes('failed') || msg.includes('!')) return 'error';
+  if (lower.includes('warning') || msg.includes('~')) return 'warning';
+  if (lower.includes('====') || lower.includes('complete') || lower.includes('framework:') || lower.includes('found')) return 'highlight';
+  return '';
+}
+
+function detectPhase(msg) {
+  if (msg.includes('Phase 1') || msg.includes('Discovering')) return 'discovery';
+  if (msg.includes('Phase 2') || msg.includes('Running') || msg.includes('test suite')) return 'analyzing';
+  if (msg.includes('Phase 3') || msg.includes('Generating report')) return 'reporting';
+  if (msg.includes('Launching') || msg.includes('Initializ')) return 'starting';
+  return null;
+}
 
 async function runTest() {
   const url = document.getElementById('url').value.trim();
   if (!url) { alert('Please enter a URL'); return; }
 
-  const btn = document.getElementById('runBtn');
-  btn.disabled = true;
-  btn.textContent = 'Starting...';
+  setRunning(true);
+  logOffset = 0;
+  testStartTime = Date.now();
 
   const res = await fetch('/api/test', {
     method: 'POST',
@@ -307,24 +497,93 @@ async function runTest() {
   });
 
   const data = await res.json();
-  btn.textContent = 'Run Tests';
-  btn.disabled = false;
+  currentJobId = data.job_id;
 
-  showStatus('running', `<div class="spinner"></div> Testing <strong>${url}</strong>...`);
+  // Show running status with log console
+  showStatus('running', `
+    <div class="status-header">
+      <div class="spinner"></div>
+      <span>Testing <strong>${escHtml(url)}</strong></span>
+      <span class="elapsed" id="elapsed">0s</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+      <span class="phase-badge starting" id="phaseBadge">STARTING</span>
+      <span id="phaseDetail" style="color:#8b8fa3; font-size:0.85rem;">Initializing browser...</span>
+    </div>
+    <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar" style="width:5%"></div></div>
+    <div class="log-console" id="logConsole">
+      <div class="log-console-header">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+        <span id="logCount">0 log entries</span>
+      </div>
+      <div class="log-lines" id="logLines"></div>
+    </div>
+  `);
+
+  // Start elapsed timer
+  if (elapsedInterval) clearInterval(elapsedInterval);
+  elapsedInterval = setInterval(() => {
+    const el = document.getElementById('elapsed');
+    if (el) el.textContent = formatElapsed((Date.now() - testStartTime) / 1000);
+  }, 1000);
+
   pollJob(data.job_id);
 }
 
 function pollJob(jobId) {
   if (pollInterval) clearInterval(pollInterval);
   pollInterval = setInterval(async () => {
-    const res = await fetch(`/api/test/${jobId}`);
-    const data = await res.json();
+    // Fetch status + logs in parallel
+    const [statusRes, logsRes] = await Promise.all([
+      fetch(`/api/test/${jobId}`),
+      fetch(`/api/test/${jobId}/logs?since=${logOffset}`)
+    ]);
+    const statusData = await statusRes.json();
+    const logsData = await logsRes.json();
 
-    if (data.status === 'completed') {
+    // Append new logs
+    if (logsData.logs && logsData.logs.length > 0) {
+      const logLines = document.getElementById('logLines');
+      const logConsole = document.getElementById('logConsole');
+      if (logLines) {
+        for (const log of logsData.logs) {
+          const cls = classifyLog(log.msg);
+          const div = document.createElement('div');
+          div.className = 'log-line' + (cls ? ' ' + cls : '');
+
+          const ts = new Date(log.ts * 1000);
+          const timeStr = ts.toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+          div.innerHTML = `<span class="log-ts">${timeStr}</span>${escHtml(log.msg)}`;
+          logLines.appendChild(div);
+
+          // Detect phase changes
+          const phase = detectPhase(log.msg);
+          if (phase) updatePhase(phase, log.msg);
+        }
+        logOffset = logsData.total;
+        // Auto-scroll to bottom
+        if (logConsole) logConsole.scrollTop = logConsole.scrollHeight;
+        // Update log count
+        const countEl = document.getElementById('logCount');
+        if (countEl) countEl.textContent = `${logsData.total} log entries`;
+      }
+    }
+
+    // Update progress bar estimate
+    updateProgressFromLogs(statusData, logsData.total);
+
+    if (statusData.status === 'completed') {
       clearInterval(pollInterval);
-      const r = data.result;
+      if (elapsedInterval) clearInterval(elapsedInterval);
+      const r = statusData.result;
+      const elapsed = formatElapsed((Date.now() - testStartTime) / 1000);
+
       showStatus('completed', `
-        <div class="status-header pass">Tests Completed</div>
+        <div class="status-header">
+          <span class="pass" style="font-size:1.3rem;">&#10003;</span>
+          <span>Tests Completed</span>
+          <span class="elapsed">${elapsed}</span>
+        </div>
         <div class="metrics">
           <div class="metric"><div class="value">${r.pages_tested}</div><div class="label">Pages</div></div>
           <div class="metric"><div class="value">${r.total_tests}</div><div class="label">Total Tests</div></div>
@@ -340,13 +599,61 @@ function pollJob(jobId) {
           <a href="/api/test/${jobId}/json" target="_blank">JSON Report</a>
         </div>
       `);
+      setRunning(false);
       loadJobs();
-    } else if (data.status === 'failed') {
+
+    } else if (statusData.status === 'failed') {
       clearInterval(pollInterval);
-      showStatus('failed', `<div class="status-header fail">Test Failed</div><p>${data.error || 'Unknown error'}</p>`);
+      if (elapsedInterval) clearInterval(elapsedInterval);
+      showStatus('failed', `
+        <div class="status-header">
+          <span class="fail" style="font-size:1.2rem;">&#10007;</span>
+          <span>Test Run Failed</span>
+        </div>
+        <p style="margin-top:8px; color:#ef4444;">${escHtml(statusData.error || 'Unknown error')}</p>
+      `);
+      setRunning(false);
       loadJobs();
     }
-  }, 3000);
+  }, 2000);
+}
+
+function updatePhase(phase, msg) {
+  const badge = document.getElementById('phaseBadge');
+  const detail = document.getElementById('phaseDetail');
+  if (!badge || !detail) return;
+
+  const labels = {
+    starting: 'STARTING',
+    discovery: 'DISCOVERY',
+    analyzing: 'ANALYZING',
+    reporting: 'REPORTING',
+  };
+  badge.className = 'phase-badge ' + phase;
+  badge.textContent = labels[phase] || phase.toUpperCase();
+
+  // Extract a meaningful detail from the log message
+  let shortMsg = msg;
+  if (msg.includes(':')) shortMsg = msg.split(':').slice(1).join(':').trim();
+  if (shortMsg.length > 80) shortMsg = shortMsg.substring(0, 77) + '...';
+  detail.textContent = shortMsg || msg;
+}
+
+function updateProgressFromLogs(statusData, logCount) {
+  const bar = document.getElementById('progressBar');
+  if (!bar) return;
+  // Rough heuristic: logs progress through phases
+  let pct = Math.min(95, 5 + (logCount * 2));
+  if (statusData.progress) {
+    const p = statusData.progress.phase;
+    if (p === 'starting') pct = Math.max(pct, 5);
+    else if (p === 'discovery') pct = Math.max(pct, 15);
+    else if (p === 'analyzing') pct = Math.max(pct, 35);
+    else if (p === 'reporting') pct = Math.max(pct, 85);
+    else if (p === 'done') pct = 100;
+  }
+  bar.style.width = pct + '%';
+  if (pct >= 100) bar.style.animation = 'none';
 }
 
 function showStatus(cls, html) {
@@ -354,6 +661,12 @@ function showStatus(cls, html) {
   el.className = cls;
   el.innerHTML = html;
   el.style.display = 'block';
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
 async function loadJobs() {
@@ -364,15 +677,22 @@ async function loadJobs() {
     if (!data.jobs.length) { el.innerHTML = '<em style="color: #8b8fa3;">No jobs yet</em>'; return; }
     el.innerHTML = `<table class="jobs-table">
       <tr><th>Job ID</th><th>URL</th><th>Status</th><th>Action</th></tr>
-      ${data.jobs.map(j => `<tr>
+      ${data.jobs.slice(0, 10).map(j => `<tr>
         <td><code>${j.job_id}</code></td>
-        <td>${j.url}</td>
+        <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(j.url)}</td>
         <td><span class="badge ${j.status}">${j.status}</span></td>
         <td>${j.status === 'completed' ? `<a href="/api/test/${j.job_id}/report" target="_blank" style="color:#818cf8;">Report</a>` : '-'}</td>
       </tr>`).join('')}
     </table>`;
   } catch(e) {}
 }
+
+// Enter key triggers test
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('url').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !document.getElementById('runBtn').disabled) runTest();
+  });
+});
 
 loadJobs();
 </script>
