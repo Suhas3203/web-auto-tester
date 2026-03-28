@@ -25,8 +25,9 @@ WORKDIR /app
 COPY --from=builder /app/deps /usr/local/lib/python3.12/site-packages/
 
 # Install ONLY Chromium (not Firefox/WebKit — saves ~300MB)
-RUN playwright install chromium \
-    && playwright install-deps chromium 2>/dev/null || true
+# Use python -m to ensure we use the exact playwright version from our deps
+RUN python -m playwright install chromium \
+    && python -m playwright install-deps chromium 2>/dev/null || true
 
 # Copy application code (only what's needed)
 COPY web_auto_tester/ ./web_auto_tester/
