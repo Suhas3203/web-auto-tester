@@ -29,10 +29,26 @@ from web_auto_tester.database import init_db, save_run, list_runs, get_run
 
 
 # ── App lifespan: init DB on startup ─────────────────────────────────────────
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
     await init_db()
     yield
+
+
+def _save_run_threadsafe(**kwargs) -> None:
+    """Call save_run() from a background thread onto the main event loop."""
+    if _main_loop is None:
+        return
+    future = asyncio.run_coroutine_threadsafe(save_run(**kwargs), _main_loop)
+    try:
+        future.result(timeout=10)
+    except Exception:
+        pass  # DB failure must never crash the test run
 
 
 app = FastAPI(
@@ -148,8 +164,8 @@ def _run_test_job(job_id: str, req: TestRequest):
         if json_path.exists():
             report_json_str = json_path.read_text(encoding="utf-8")
 
-        # Persist to DB (asyncio.run is safe here — we're in a thread)
-        asyncio.run(save_run(
+        # Persist to DB — schedule on main event loop from this thread
+        _save_run_threadsafe(
             run_id=job_id,
             url=url,
             mode="lite",
@@ -165,7 +181,7 @@ def _run_test_job(job_id: str, req: TestRequest):
             warnings=report.total_warnings,
             pass_rate=round(report.pass_rate, 1),
             report_json=report_json_str,
-        ))
+        )
 
     except Exception as e:
         err = str(e)
@@ -174,7 +190,7 @@ def _run_test_job(job_id: str, req: TestRequest):
         jobs[job_id]["completed_at"] = time.time()
         jobs[job_id]["progress"] = {"phase": "error", "detail": err}
 
-        asyncio.run(save_run(
+        _save_run_threadsafe(
             run_id=job_id,
             url=req.url,
             mode="lite",
@@ -190,7 +206,7 @@ def _run_test_job(job_id: str, req: TestRequest):
             warnings=0,
             pass_rate=0.0,
             error_msg=err,
-        ))
+        )
 
     finally:
         sys.stdout = original_stdout
