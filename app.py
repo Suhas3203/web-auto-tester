@@ -425,15 +425,17 @@ async def home():
   .elapsed { color: #6b6e8a; font-size: 0.85rem; float: right; }
 
   /* ── History table ── */
-  .history-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 0.9rem; }
+  .history-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 0.9rem; table-layout: fixed; }
   .history-table th {
     padding: 10px 12px; text-align: left; border-bottom: 1px solid #2e3348;
     color: #8b8fa3; font-size: 0.8rem; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;
+    overflow: hidden;
   }
-  .history-table td { padding: 11px 12px; border-bottom: 1px solid #1e2130; vertical-align: middle; }
+  .history-table td { padding: 11px 12px; border-bottom: 1px solid #1e2130; vertical-align: middle; overflow: hidden; }
   .history-table tr:last-child td { border-bottom: none; }
   .history-table tr:hover td { background: #1e2130; }
-  .history-table .url-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7cbe0; }
+  .history-table .url-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7cbe0; }
+  .history-table .report-cell { white-space: nowrap; }
   .badge { padding: 3px 10px; border-radius: 10px; font-size: 0.78rem; font-weight: 700; }
   .badge.completed { background: #0f2a1f; color: #22c55e; }
   .badge.failed { background: #2a0f0f; color: #ef4444; }
@@ -755,6 +757,17 @@ async function loadHistory() {
 
     el.innerHTML = `
       <table class="history-table">
+        <colgroup>
+          <col style="width:22%">
+          <col style="width:12%">
+          <col style="width:9%">
+          <col style="width:7%">
+          <col style="width:7%">
+          <col style="width:8%">
+          <col style="width:13%">
+          <col style="width:10%">
+          <col style="width:12%">
+        </colgroup>
         <thead>
           <tr>
             <th>URL</th>
@@ -776,10 +789,10 @@ async function loadHistory() {
             const fwVer = r.framework_version ? ` <span class="fw-tag">v${escHtml(r.framework_version)}</span>` : '';
             const reportLink = r.status === 'completed'
               ? `<a class="action-link" href="/api/test/${r.id}/report" target="_blank">HTML</a>
-                 &nbsp;·&nbsp;
-                 <a class="action-link" href="/api/reports/${r.id}" target="_blank">JSON</a>`
+                 &nbsp;<span style="color:#2e3348">|</span>&nbsp;
+                 <a class="action-link" href="/api/test/${r.id}/json" target="_blank">JSON</a>`
               : r.error_msg
-                ? `<span style="color:#6b6e8a;font-size:0.8rem;" title="${escHtml(r.error_msg)}">failed</span>`
+                ? `<span style="color:#6b6e8a;font-size:0.78rem;" title="${escHtml(r.error_msg)}">—</span>`
                 : '—';
             return `<tr>
               <td class="url-cell" title="${escHtml(r.url)}">${escHtml(r.url)}</td>
@@ -790,7 +803,7 @@ async function loadHistory() {
               <td>${r.duration_seconds ? r.duration_seconds + 's' : '—'}</td>
               <td style="white-space:nowrap; color:#8b8fa3;">${fmtDate(r.started_at)}</td>
               <td><span class="badge ${r.status}">${r.status}</span></td>
-              <td>${reportLink}</td>
+              <td class="report-cell">${reportLink}</td>
             </tr>`;
           }).join('')}
         </tbody>
