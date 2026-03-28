@@ -11,5 +11,9 @@ services:
         value: /tmp/web-auto-tester-reports
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: RENDER
+        value: "true"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
     healthCheckPath: /health
     autoDeploy: true

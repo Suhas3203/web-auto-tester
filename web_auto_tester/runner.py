@@ -7,7 +7,9 @@ Coordinates discovery + analysis + report generation.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import os
 import time
 from pathlib import Path
 
@@ -17,6 +19,37 @@ from .models import TestReport, PageResult, TestStatus
 from .discovery import SiteCrawler
 from .analyzers import ALL_ANALYZERS
 from .report import generate_html_report
+
+# ── Memory-optimized Chromium flags ──────────────────────────────────────────
+# These reduce Chromium's RAM footprint from ~200MB to ~80-120MB,
+# critical for 512MB containers (Render free tier, small VPS, etc.)
+LOW_MEMORY_CHROMIUM_ARGS = [
+    "--disable-gpu",
+    "--disable-dev-shm-usage",        # Use /tmp instead of /dev/shm (limited in Docker)
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-default-apps",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--safebrowsing-disable-auto-update",
+    "--single-process",               # Run browser in single process (saves ~50MB)
+    "--js-flags=--max-old-space-size=128",  # Limit V8 heap to 128MB
+    "--disable-features=TranslateUI",
+    "--disable-features=BlinkGenPropertyTrees",
+    "--font-render-hinting=none",
+]
 
 
 class AutoTestRunner:
@@ -38,6 +71,7 @@ class AutoTestRunner:
         browser: str = "chromium",
         screenshots: bool = True,
         timeout: int = 30000,
+        low_memory: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.max_pages = max_pages
@@ -47,6 +81,8 @@ class AutoTestRunner:
         self.browser = browser
         self.screenshots = screenshots
         self.timeout = timeout
+        # Auto-detect: if RENDER env var is set or explicitly requested
+        self.low_memory = low_memory or os.environ.get("RENDER") is not None
 
     def run(self) -> TestReport:
         """Synchronous entry point."""
@@ -61,6 +97,15 @@ class AutoTestRunner:
 
         report = TestReport(base_url=self.base_url)
 
+        # In low-memory mode, reduce defaults
+        if self.low_memory:
+            self.max_pages = min(self.max_pages, 10)
+            self.screenshots = False  # Screenshots eat RAM on full-page render
+            viewport = {"width": 1024, "height": 576}
+            print("[*] Low-memory mode active (512MB optimized)")
+        else:
+            viewport = {"width": 1280, "height": 720}
+
         print(f"\n{'='*60}")
         print(f"  Web Auto Tester v1.0.0")
         print(f"  Target: {self.base_url}")
@@ -69,9 +114,17 @@ class AutoTestRunner:
         async with async_playwright() as pw:
             print(f"[*] Launching {self.browser} (headless={self.headless})...")
             browser_type = getattr(pw, self.browser)
-            browser = await browser_type.launch(headless=self.headless)
+
+            launch_args = {}
+            if self.low_memory:
+                launch_args["args"] = LOW_MEMORY_CHROMIUM_ARGS
+
+            browser = await browser_type.launch(
+                headless=self.headless,
+                **launch_args,
+            )
             context = await browser.new_context(
-                viewport={"width": 1280, "height": 720},
+                viewport=viewport,
                 ignore_https_errors=True,
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -131,7 +184,7 @@ class AutoTestRunner:
                         except Exception as e:
                             print(f"    \033[31m!\033[0m {name}: ERROR - {e}")
 
-                    # Screenshot
+                    # Screenshot (skipped in low_memory mode)
                     if self.screenshots:
                         try:
                             await page.goto(dp.url, wait_until="networkidle", timeout=self.timeout)
@@ -149,6 +202,10 @@ class AutoTestRunner:
 
                 report.pages.append(pr)
                 print(f"    => {pr.passed}P / {pr.failed}F / {pr.warnings}W\n")
+
+                # Force garbage collection between pages in low-memory mode
+                if self.low_memory:
+                    gc.collect()
 
             await browser.close()
 

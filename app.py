@@ -72,10 +72,10 @@ class _LogCapture(io.TextIOBase):
 
 class TestRequest(BaseModel):
     url: str
-    max_pages: int = 20
-    max_depth: int = 3
+    max_pages: int = 5
+    max_depth: int = 2
     browser: str = "chromium"
-    timeout: int = 30000
+    timeout: int = 20000
 
 
 class TestResponse(BaseModel):
@@ -109,8 +109,9 @@ def _run_test_job(job_id: str, req: TestRequest):
             headless=True,
             browser=req.browser,
             output_dir=output_dir,
-            screenshots=True,
+            screenshots=False,
             timeout=req.timeout,
+            low_memory=True,
         )
 
         report = runner.run()
@@ -404,11 +405,11 @@ async def home():
     <div class="row">
       <div>
         <label for="maxPages">Max Pages</label>
-        <input type="number" id="maxPages" value="20" min="1" max="100">
+        <input type="number" id="maxPages" value="5" min="1" max="20">
       </div>
       <div>
         <label for="maxDepth">Max Depth</label>
-        <input type="number" id="maxDepth" value="3" min="1" max="10">
+        <input type="number" id="maxDepth" value="2" min="1" max="5">
       </div>
       <div>
         <label for="browser">Browser</label>
