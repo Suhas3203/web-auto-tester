@@ -31,3 +31,4 @@ docs/*.pdf
 # Environment
 .env
 .env.local
+web-auto-tester.db

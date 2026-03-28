@@ -15,5 +15,10 @@ services:
         value: "true"
       - key: MALLOC_ARENA_MAX
         value: "2"
+      # Set this to your free Neon (neon.tech) or Supabase PostgreSQL connection
+      # string to persist reports across deploys. Leave unset to use SQLite
+      # (resets on each deploy — not recommended for production).
+      - key: DATABASE_URL
+        sync: false   # secret — set manually in Render dashboard
     healthCheckPath: /health
     autoDeploy: true
