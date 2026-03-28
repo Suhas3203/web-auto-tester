@@ -3,9 +3,10 @@ Async database layer for persisting test run history.
 
 Drivers:
   - SQLite  (default, local dev): sqlite+aiosqlite:///./web-auto-tester.db
-  - Neon/Supabase PostgreSQL (Render): set DATABASE_URL env var to your
-    free Neon or Supabase connection string. Both postgres:// and
-    postgresql:// prefixes are normalised automatically.
+  - Supabase PostgreSQL (Render): set DATABASE_URL env var to the
+    "Transaction pooler" connection string from your Supabase project
+    (Settings → Database → Connection string → URI, port 6543).
+    Both postgres:// and postgresql:// prefixes are normalised automatically.
 
 Usage:
     from web_auto_tester.database import init_db, save_run, list_runs, get_run
@@ -15,9 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 
-from sqlalchemy import select, desc, text
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Float, Integer, Text
@@ -26,22 +26,36 @@ from sqlalchemy import String, Float, Integer, Text
 # ── Connection URL ────────────────────────────────────────────────────────────
 _raw_url = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./web-auto-tester.db")
 
-# Normalise Neon / Supabase / Render Postgres URLs → asyncpg driver
+_is_postgres = "postgres" in _raw_url and "sqlite" not in _raw_url
+
+# Normalise Supabase / generic Postgres URLs → asyncpg driver
 if _raw_url.startswith("postgres://"):
     _raw_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
 elif _raw_url.startswith("postgresql://") and "+asyncpg" not in _raw_url:
     _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# Strip ?sslmode=... from URL — asyncpg handles SSL via connect_args
+if "?sslmode=" in _raw_url:
+    _raw_url = _raw_url.split("?sslmode=")[0]
+
 DATABASE_URL = _raw_url
 
-# SQLite needs check_same_thread=False; Postgres doesn't need it
-_connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+# Supabase requires SSL; SQLite needs check_same_thread=False
+if "sqlite" in DATABASE_URL:
+    _connect_args: dict = {"check_same_thread": False}
+else:
+    import ssl as _ssl
+    _ssl_ctx = _ssl.create_default_context()
+    _ssl_ctx.check_hostname = False
+    _ssl_ctx.verify_mode = _ssl.CERT_NONE
+    _connect_args = {"ssl": _ssl_ctx}
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args=_connect_args,
-)
+_engine_kwargs: dict = {"echo": False, "connect_args": _connect_args}
+if "sqlite" not in DATABASE_URL:
+    # Supabase transaction pooler drops idle connections — keep pool small
+    _engine_kwargs.update({"pool_size": 2, "max_overflow": 3, "pool_recycle": 300, "pool_pre_ping": True})
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
